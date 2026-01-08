@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Brightspace LLM Assistant</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>📚 Brightspace Assistant</h1>
+      <p class="subtitle">Ask questions about your course materials</p>
+    </header>
+    
+    <div class="status-section">
+      <div id="fileCount" class="status-box">
+        <span class="label">Files Found:</span>
+        <span id="fileCountValue" class="value">0</span>
+      </div>
+      <button id="scanButton" class="btn btn-secondary">🔍 Scan This Page</button>
+    </div>
+    
+    <div class="upload-section">
+      <h3>📥 Or Drop Files Here</h3>
+      <div id="dropZone" class="drop-zone">
+        <p>Drag & drop files here</p>
+        <p class="drop-hint">PDF, DOCX, PPTX, TXT</p>
+      </div>
+      <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.txt" style="display:none;">
+      <div id="uploadStatus" class="status-message"></div>
+    </div>
+    
+     <div class="api-key-section">
+       <label for="apiKey">Hugging Face API Key:</label>
+       <div class="input-group">
+         <input type="password" id="apiKey" placeholder="Enter your HF API key">
+         <button id="saveApiKey" class="btn btn-small">Save</button>
+       </div>
+       <div id="apiKeyStatus" class="status-message"></div>
+     </div>
+
+     <div class="api-key-section">
+       <label for="modelSelect">HuggingFace Model:</label>
+       <div class="input-group">
+         <select id="modelSelect" style="flex:1;padding:8px;border:1px solid #ffc107;border-radius:4px;font-size:13px;">
+           <option value="meta-llama/Llama-3.3-70B-Instruct">Llama 3.3 70B ⚡ (Auto)</option>
+           <option value="meta-llama/Llama-3.3-70B-Instruct:groq">Llama 3.3 70B (Groq)</option>
+           <option value="meta-llama/Llama-2-70b-chat-hf">Llama 2 70B</option>
+           <option value="mistralai/Mistral-7B-Instruct-v0.1">Mistral 7B</option>
+         </select>
+         <button id="saveModel" class="btn btn-small">Save</button>
+       </div>
+       <div id="modelStatus" class="status-message"></div>
+     </div>    <div class="api-key-section">
+      <label for="proxyUrl">CORS Proxy URL (optional):</label>
+      <div class="input-group">
+        <input type="text" id="proxyUrl" placeholder="e.g. http://localhost:3001/hf">
+        <button id="saveProxyUrl" class="btn btn-small">Save</button>
+      </div>
+      <div id="proxyStatus" class="status-message"></div>
+    </div>
+
+    <div class="api-key-section">
+      <label>Local Model (Ollama):</label>
+      <div class="input-group">
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="useLocalLLM">
+          Use local Ollama (no API key)
+        </label>
+      </div>
+      <div class="input-group">
+        <input type="text" id="localModelName" placeholder="e.g. llama3.2:3b-instruct">
+        <button id="saveLocalModel" class="btn btn-small">Save</button>
+      </div>
+      <div class="status-message" id="localModelStatus"></div>
+      <div class="status-message" style="font-size:12px;color:#6c757d;">
+        Tip: Install and start Ollama, then pull the model:
+        brew install ollama · ollama serve · ollama pull llama3.2:3b-instruct
+      </div>
+    </div>
+    
+    <div class="files-section">
+      <h3>📄 Scanned Files</h3>
+      <div id="filesList" class="files-list">
+        <p class="empty-state">No files scanned yet. Visit a Brightspace course page and click "Scan This Page".</p>
+      </div>
+      <button id="clearFiles" class="btn btn-danger btn-small">Clear All Files</button>
+    </div>
+    
+    <div class="api-key-section">
+      <label>Google Drive Sync:</label>
+      <div class="input-group">
+        <button id="driveAuth" class="btn btn-small">☁️ Authorize Drive</button>
+        <button id="backupToDrive" class="btn btn-small" style="flex:1;background:#28a745;">💾 Backup</button>
+        <button id="restoreFromDrive" class="btn btn-small" style="flex:1;background:#007bff;">⬇️ Restore</button>
+      </div>
+      <div id="driveStatus" class="status-message"></div>
+    </div>
+
+     <div class="chat-section">
+      <h3>💬 Ask a Question</h3>
+      <div id="chatHistory" class="chat-history"></div>
+      
+      <div class="input-group">
+        <textarea 
+          id="questionInput" 
+          placeholder="Ask about deadlines, assignments, syllabus details..."
+          rows="3"
+        ></textarea>
+      </div>
+      
+      <div class="examples">
+        <p class="examples-label">Try asking:</p>
+        <button class="example-btn" data-question="What are the upcoming assignment deadlines?">📅 Upcoming deadlines</button>
+        <button class="example-btn" data-question="What is the grading policy?">📊 Grading policy</button>
+        <button class="example-btn" data-question="What are the course learning objectives?">🎯 Learning objectives</button>
+      </div>
+      
+      <button id="askButton" class="btn btn-primary">
+        <span id="buttonText">Ask Question</span>
+        <span id="loadingSpinner" class="spinner hidden">⏳</span>
+      </button>
+    </div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

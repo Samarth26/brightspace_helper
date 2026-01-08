@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "Brightspace LLM Assistant",
+  "version": "1.0.0",
+  "description": "Scans Brightspace for course files and uses Llama LLM to answer questions about deadlines, syllabus, and more",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "identity",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "*://*.brightspace.com/*",
+    "*://*.d2l.com/*",
+    "*://*.brightspace.nyu.edu/*",
+    "*://brightspace.nyu.edu/*",
+    "*://localhost/*",
+    "https://router.huggingface.co/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.brightspace.com/*",
+        "*://*.d2l.com/*",
+        "*://*.nyu.edu/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content.js", "pdf.min.js", "pdf.worker.min.js", "offscreen.html", "offscreen.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "oauth2": {
+    "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/drive.file"]
+  }
+}
+
