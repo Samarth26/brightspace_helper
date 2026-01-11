@@ -70,9 +70,129 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 console.log('✓ Message listener registered');
 console.log('=== OFFSCREEN INITIALIZATION COMPLETE ===');
 
+let port = null;
+
+function connectOffscreenPort() {
+  if (port) return;
+
+  port = chrome.runtime.connect({ name: 'pdf-offscreen' });
+  port.postMessage({ type: 'ready' });
+  console.log('✓ Offscreen port ready');
+
+  port.onMessage.addListener((message) => {
+    if (message?.type === 'ping') {
+      port.postMessage({ type: 'ready' });
+      return;
+    }
+
+    if (message?.action === 'convertPDFToImages') {
+      handlePDFConversionStream(message)
+        .catch(error => {
+          port.postMessage({
+            type: 'error',
+            requestId: message.requestId,
+            error: error.message
+          });
+        });
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    console.warn('Offscreen port disconnected, retrying...');
+    port = null;
+    setTimeout(connectOffscreenPort, 500);
+  });
+}
+
+connectOffscreenPort();
+
+async function ensurePdfJsReady() {
+  if (typeof pdfjsLib !== 'undefined') {
+    return pdfjsLib;
+  }
+
+  const maxWaitMs = 5000;
+  const start = Date.now();
+
+  while (Date.now() - start < maxWaitMs) {
+    if (typeof pdfjsLib !== 'undefined') {
+      return pdfjsLib;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  throw new Error('PDF.js not available in offscreen document');
+}
+
+async function handlePDFConversionStream(message) {
+  const { pdfDataUrl, fileName, requestId } = message;
+  console.log(`Converting PDF to images in offscreen: ${fileName}`);
+
+  await ensurePdfJsReady();
+
+  const response = await fetch(pdfDataUrl);
+  const arrayBuffer = await response.arrayBuffer();
+
+  const loadingTask = pdfjsLib.getDocument({
+    data: arrayBuffer,
+    disableWorker: true,
+    useWorkerFetch: false,
+    useRangeRequests: false
+  });
+
+  const pdf = await loadingTask.promise;
+  console.log(`PDF loaded: ${pdf.numPages} pages`);
+
+  const maxPages = Math.min(pdf.numPages, 8);
+
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    try {
+      port.postMessage({ type: 'progress', requestId, pageNum });
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 1.2 });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      const context = canvas.getContext('2d');
+      const renderTask = page.render({
+        canvasContext: context,
+        viewport: viewport
+      });
+
+      await renderTask.promise;
+
+      const imageDataUrl = canvas.toDataURL('image/jpeg', 0.6);
+      if (!imageDataUrl || imageDataUrl.length < 50) {
+        console.warn('Skipping empty offscreen image for page', pageNum);
+        continue;
+      }
+
+      port.postMessage({
+        type: 'page',
+        requestId,
+        image: {
+          dataUrl: imageDataUrl,
+          pageNum,
+          fileName
+        }
+      });
+
+      console.log(`✓ Page ${pageNum}/${maxPages} rendered`);
+    } catch (pageError) {
+      console.warn(`Error rendering page ${pageNum}:`, pageError);
+    }
+  }
+
+  port.postMessage({ type: 'done', requestId });
+}
+
 async function handlePDFConversion(pdfDataUrl, fileName) {
   try {
     console.log(`Converting PDF to images in offscreen: ${fileName}`);
+
+    await ensurePdfJsReady();
     
     // Fetch the PDF data
     const response = await fetch(pdfDataUrl);
@@ -81,6 +201,7 @@ async function handlePDFConversion(pdfDataUrl, fileName) {
     // Load PDF document
     const loadingTask = pdfjsLib.getDocument({ 
       data: arrayBuffer,
+      disableWorker: true,
       useWorkerFetch: false,
       useRangeRequests: false
     });

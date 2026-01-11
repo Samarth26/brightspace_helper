@@ -8,7 +8,8 @@
     "activeTab",
     "scripting",
     "identity",
-    "offscreen"
+    "offscreen",
+    "tabs"
   ],
   "host_permissions": [
     "*://*.brightspace.com/*",
@@ -16,7 +17,8 @@
     "*://*.brightspace.nyu.edu/*",
     "*://brightspace.nyu.edu/*",
     "*://localhost/*",
-    "https://router.huggingface.co/*"
+    "https://router.huggingface.co/*",
+    "https://api-inference.huggingface.co/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -47,7 +49,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["content.js", "pdf.min.js", "pdf.worker.min.js", "offscreen.html", "offscreen.js"],
+      "resources": ["content.js", "pdf.min.js", "pdf.worker.min.js", "offscreen.html", "offscreen.js", "renderer.html", "renderer.js", "page-pdf-renderer.js"],
       "matches": ["<all_urls>"]
     }
   ],
@@ -56,4 +58,3 @@
     "scopes": ["https://www.googleapis.com/auth/drive.file"]
   }
 }
-

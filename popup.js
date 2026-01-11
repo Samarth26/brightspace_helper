@@ -27,7 +27,7 @@ async function loadApiKey() {
 // Load HF model from storage
 async function loadHFModel() {
   chrome.storage.local.get(['hfModel'], (result) => {
-    const model = result.hfModel || 'meta-llama/Llama-3.3-70B-Instruct';
+    const model = result.hfModel || 'meta-llama/Llama-3.2-11B-Vision-Instruct';
     document.getElementById('modelSelect').value = model;
   });
 }
@@ -682,4 +682,3 @@ function updateDriveStatus(message, isError = false) {
   el.textContent = message;
   el.className = isError ? 'status-message error' : 'status-message ok';
 }
-

@@ -196,41 +196,88 @@ function extractCourseInfo() {
   return courseInfo;
 }
 
-// Load PDF.js for content script rendering
-let pdfjsLib = null;
+// Load PDF.js in page context and communicate via postMessage
 const pdfScriptUrl = chrome.runtime.getURL('pdf.min.js');
-const workerScriptUrl = chrome.runtime.getURL('pdf.worker.min.js');
+const pageRendererUrl = chrome.runtime.getURL('page-pdf-renderer.js');
+const PAGE_RENDERER_SOURCE = 'pdf-renderer';
 
-async function loadPdfJs() {
-  if (pdfjsLib) return; // Already loaded
-  
-  try {
-    // Load the main library
+const pendingPageRequests = new Map();
+let pageRendererReady = false;
+let pageRendererReadyPromise = null;
+let pageRendererReadyResolve = null;
+let pageRendererReadyReject = null;
+let pageRendererReadyTimeoutId = null;
+
+function injectScript(url) {
+  return new Promise((resolve, reject) => {
     const script = document.createElement('script');
-    script.src = pdfScriptUrl;
-    document.head.appendChild(script);
-    
-    // Wait for pdfjsLib to be available
-    await new Promise((resolve, reject) => {
-      const maxWait = 5000;
-      const startTime = Date.now();
-      const checkInterval = setInterval(() => {
-        if (window.pdfjsLib) {
-          clearInterval(checkInterval);
-          pdfjsLib = window.pdfjsLib;
-          // Set worker source
-          pdfjsLib.GlobalWorkerOptions.workerSrc = workerScriptUrl;
-          console.log('✓ PDF.js loaded in content script with worker at:', workerScriptUrl);
-          resolve();
-        } else if (Date.now() - startTime > maxWait) {
-          clearInterval(checkInterval);
-          reject(new Error('PDF.js failed to load within timeout'));
-        }
-      }, 100);
-    });
-  } catch (error) {
-    console.error('Failed to load PDF.js in content script:', error);
+    script.src = url;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`Failed to load script: ${url}`));
+    (document.head || document.documentElement).appendChild(script);
+  });
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== PAGE_RENDERER_SOURCE) return;
+
+  if (data.type === 'ready') {
+    pageRendererReady = true;
+    if (pageRendererReadyTimeoutId) {
+      clearTimeout(pageRendererReadyTimeoutId);
+      pageRendererReadyTimeoutId = null;
+    }
+    if (pageRendererReadyResolve) {
+      pageRendererReadyResolve();
+      pageRendererReadyResolve = null;
+      pageRendererReadyReject = null;
+      pageRendererReadyPromise = null;
+    }
+    return;
   }
+
+  if (!data.requestId || !pendingPageRequests.has(data.requestId)) return;
+  const pending = pendingPageRequests.get(data.requestId);
+
+  if (data.type === 'result') {
+    pendingPageRequests.delete(data.requestId);
+    pending.resolve(data.images || []);
+    return;
+  }
+
+  if (data.type === 'error') {
+    pendingPageRequests.delete(data.requestId);
+    pending.reject(new Error(data.error || 'Page renderer failed'));
+  }
+});
+
+async function ensurePageRendererReady() {
+  if (pageRendererReady) return;
+
+  if (!pageRendererReadyPromise) {
+    pageRendererReadyPromise = new Promise((resolve, reject) => {
+      pageRendererReadyResolve = resolve;
+      pageRendererReadyReject = reject;
+    });
+
+    pageRendererReadyTimeoutId = setTimeout(() => {
+      if (pageRendererReadyReject) {
+        pageRendererReadyReject(new Error('PDF page renderer did not become ready'));
+      }
+      pageRendererReadyPromise = null;
+      pageRendererReadyResolve = null;
+      pageRendererReadyReject = null;
+      pageRendererReadyTimeoutId = null;
+    }, 10000);
+
+    await injectScript(pdfScriptUrl);
+    await injectScript(pageRendererUrl);
+    window.postMessage({ source: PAGE_RENDERER_SOURCE, type: 'ping' }, '*');
+  }
+
+  await pageRendererReadyPromise;
 }
 
 // Listen for messages from popup or background script
@@ -265,65 +312,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       try {
         const { pdfDataUrl, fileName } = request;
         
-        // Ensure PDF.js is loaded in content script context
-        await loadPdfJs();
-        
-        if (!pdfjsLib) {
-          throw new Error('PDF.js not available in content script');
-        }
-        
-        console.log(`Converting PDF to images: ${fileName}`);
-        
-        // Fetch the PDF data
-        const response = await fetch(pdfDataUrl);
-        const arrayBuffer = await response.arrayBuffer();
-        
-        // Load PDF document
-        const loadingTask = pdfjsLib.getDocument({ 
-          data: arrayBuffer,
-          useWorkerFetch: false,
-          useRangeRequests: false
+        await ensurePageRendererReady();
+
+        const requestId = `page-render-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const images = await new Promise((resolve, reject) => {
+          const timeoutId = setTimeout(() => {
+            pendingPageRequests.delete(requestId);
+            reject(new Error('Page renderer timeout after 60s'));
+          }, 60000);
+
+          pendingPageRequests.set(requestId, {
+            resolve: (result) => {
+              clearTimeout(timeoutId);
+              resolve(result);
+            },
+            reject: (error) => {
+              clearTimeout(timeoutId);
+              reject(error);
+            }
+          });
+
+          window.postMessage({
+            source: PAGE_RENDERER_SOURCE,
+            type: 'render',
+            requestId,
+            pdfDataUrl,
+            fileName
+          }, '*');
         });
-        
-        const pdf = await loadingTask.promise;
-        console.log(`PDF loaded: ${pdf.numPages} pages`);
-        
-        const images = [];
-        const maxPages = Math.min(pdf.numPages, 20); // Limit to 20 pages
-        
-        // Render each page to canvas
-        for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
-          try {
-            const page = await pdf.getPage(pageNum);
-            const viewport = page.getViewport({ scale: 2 }); // 2x scale for better quality
-            
-            // Create canvas with proper dimensions
-            const canvas = document.createElement('canvas');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            
-            const context = canvas.getContext('2d');
-            const renderTask = page.render({
-              canvasContext: context,
-              viewport: viewport
-            });
-            
-            await renderTask.promise;
-            
-            // Convert to JPEG data URL
-            const imageDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-            images.push({
-              dataUrl: imageDataUrl,
-              pageNum: pageNum,
-              fileName: fileName
-            });
-            
-            console.log(`✓ Page ${pageNum} rendered to image`);
-          } catch (pageError) {
-            console.warn(`Error rendering page ${pageNum}:`, pageError);
-          }
-        }
-        
+
         console.log(`✓ Converted ${images.length} pages to images`);
         sendResponse({
           success: true,
