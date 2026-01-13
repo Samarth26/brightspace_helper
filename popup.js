@@ -426,6 +426,21 @@ async function askQuestion() {
     // Send to background script for processing
     const proxyUrl = document.getElementById('proxyUrl').value.trim();
     const hfModel = document.getElementById('modelSelect').value;
+    console.log('Sending askQuestion to background:', {
+      questionLength: question.length,
+      fileCount: scannedFiles.length,
+      useLocalLLM,
+      localModelName: localModelName || 'llama3.2:3b-instruct',
+      hfModel
+    });
+    const timeoutId = setTimeout(() => {
+      console.error('askQuestion timeout: no response from background after 30s');
+      addMessageToChat('assistant', 'Error: No response from background service worker.');
+      button.disabled = false;
+      buttonText.classList.remove('hidden');
+      spinner.classList.add('hidden');
+    }, 30000);
+
     chrome.runtime.sendMessage({
       action: 'askQuestion',
       question: question,
@@ -436,6 +451,12 @@ async function askQuestion() {
       localModelName: localModelName || 'llama3.2:3b-instruct',
       hfModel: hfModel
     }, (response) => {
+      clearTimeout(timeoutId);
+      if (chrome.runtime.lastError) {
+        console.error('askQuestion runtime error:', chrome.runtime.lastError);
+      } else {
+        console.log('askQuestion response:', response);
+      }
       if (response && response.success) {
         addMessageToChat('assistant', response.answer);
       } else {

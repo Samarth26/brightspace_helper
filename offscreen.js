@@ -34,6 +34,9 @@ try {
 // Listen for messages from background script
 console.log('Setting up message listener...');
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.target !== 'offscreen') {
+    return false;
+  }
   console.log('=== OFFSCREEN RECEIVED MESSAGE ===');
   console.log('Timestamp:', new Date().toISOString());
   console.log('Action:', message.action);
@@ -60,6 +63,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, error: error.message });
       });
     return true; // Keep channel open for async
+  }
+
+  if (message.action === 'extractPDFText') {
+    console.log('Starting PDF text extraction for:', message.fileName || 'unknown');
+    extractPDFTextFromMessage(message)
+      .then(text => {
+        console.log(`✓ Offscreen extracted ${text.length} chars of PDF text`);
+        sendResponse({ success: true, text });
+      })
+      .catch(error => {
+        console.error('Offscreen PDF text extraction error:', error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
   }
   
   console.warn('Unknown action received:', message.action);
@@ -250,4 +267,46 @@ async function handlePDFConversion(pdfDataUrl, fileName) {
     console.error('PDF conversion failed:', error);
     throw error;
   }
+}
+
+async function extractPDFTextFromMessage(message) {
+  await ensurePdfJsReady();
+
+  let arrayBuffer;
+  if (message.arrayBuffer) {
+    arrayBuffer = message.arrayBuffer;
+  } else if (message.pdfDataUrl) {
+    const response = await fetch(message.pdfDataUrl);
+    arrayBuffer = await response.arrayBuffer();
+  } else {
+    throw new Error('No PDF data provided');
+  }
+
+  const loadingTask = pdfjsLib.getDocument({
+    data: arrayBuffer,
+    disableWorker: true,
+    useWorkerFetch: false,
+    useRangeRequests: false
+  });
+
+  const pdf = await loadingTask.promise;
+  console.log(`PDF loaded: ${pdf.numPages} pages`);
+
+  const maxPages = Math.min(pdf.numPages, 20);
+  let fullText = '';
+
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+    try {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map(item => item.str)
+        .join(' ');
+      fullText += `\n\n--- Page ${pageNum} ---\n${pageText}`;
+    } catch (pageError) {
+      console.warn(`Error extracting page ${pageNum}:`, pageError);
+    }
+  }
+
+  return fullText.trim();
 }

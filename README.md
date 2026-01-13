@@ -21,7 +21,7 @@ A powerful Chrome extension that scans Brightspace course pages for syllabus, as
 2. **Hugging Face API Key** (free tier available)
    - Sign up at [huggingface.co](https://huggingface.co)
    - Get your API key from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-   - Accept the terms for Llama 2 model access
+   - Accept the terms for the selected Llama model access
 
 ## Installation
 
@@ -111,20 +111,26 @@ LMS/
 ## LLM Configuration
 
 ### Default Model
-The extension uses **Llama 2 7B Chat** model via Hugging Face Inference API:
-- `meta-llama/Llama-2-7b-chat-hf`
+The extension uses a small language model (SLM) by default via Hugging Face Inference API:
+- `meta-llama/Llama-3.2-3B-Instruct`
 
 ### Other Available Llama Models
 You can modify `background.js` to use alternative models:
-- `meta-llama/Llama-2-13b-chat-hf` (larger, more capable)
-- `meta-llama/Llama-2-70b-chat-hf` (largest, best quality)
+- `meta-llama/Llama-3.2-11B-Vision-Instruct` (larger, more capable)
+- `meta-llama/Llama-3.1-8B-Instruct` (balanced speed/quality)
 - Other open-source models available on Hugging Face
+
+### RAG & Embeddings
+The extension uses a lightweight RAG pipeline to ground answers in your course files:
+- Embeddings model: `Qwen/Qwen3-Embedding-8B` via Hugging Face Router
+- Chunking: 1200 characters with 150 overlap
+- Retrieval: top 8 chunks per query
 
 ### Local Alternative (Ollama)
 For completely private inference without API keys:
 
 1. Install [Ollama](https://ollama.ai)
-2. Run `ollama pull llama2`
+2. Run `ollama pull llama3.2:3b-instruct`
 3. Start Ollama: `ollama serve`
 4. Uncomment `callLlamaLLMLocal()` in `background.js`
 
@@ -204,7 +210,7 @@ For issues or questions:
 
 - [Chrome Extension Documentation](https://developer.chrome.com/docs/extensions/)
 - [Hugging Face API Docs](https://huggingface.co/docs/api-inference/index)
-- [Llama Model Card](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)
+- [Llama Model Card](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)
 - [Brightspace API (if needed)](https://docs.brightspace.com/en/content/integrations/rest/overview.htm)
 
 ## Disclaimer

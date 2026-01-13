@@ -1,6 +1,16 @@
 // Background service worker for Brightspace LLM Assistant
 // Enhanced version with retry logic and better error handling
 
+console.log('Background service worker loaded at', new Date().toISOString());
+
+self.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled promise rejection in service worker:', event.reason);
+});
+
+self.addEventListener('error', (event) => {
+  console.error('Unhandled error in service worker:', event.message || event.error);
+});
+
 // Load PDF.js for PDF text extraction
 let pdfjsLib = null;
 
@@ -95,7 +105,7 @@ async function sendMessageToOffscreen(message) {
     
     const messagePromise = new Promise((resolve, reject) => {
       console.log('Calling chrome.runtime.sendMessage...');
-      chrome.runtime.sendMessage(message, (response) => {
+    chrome.runtime.sendMessage({ ...message, target: 'offscreen' }, (response) => {
         console.log('Got response from sendMessage:', response ? 'Response received' : 'No response');
         
         if (chrome.runtime.lastError) {
@@ -109,6 +119,11 @@ async function sendMessageToOffscreen(message) {
           console.error('Offscreen returned error:', response.error);
           reject(new Error(response.error || 'Offscreen document failed'));
         } else {
+          if (typeof response.text === 'string') {
+            console.log(`✓ Received ${response.text.length} chars from offscreen`);
+            resolve(response.text);
+            return;
+          }
           console.log(`✓ Received ${response.images?.length || 0} images from offscreen`);
           resolve(response.images);
         }
@@ -549,6 +564,7 @@ async function sendMessageToActiveTab(message) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  console.log('Background received message:', request?.action, 'from', sender?.id || sender?.tab?.id || 'unknown');
   if (request.action === 'askQuestion') {
     handleQuestionRequest(request, sendResponse);
   }
@@ -556,9 +572,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function handleQuestionRequest(request, sendResponse) {
-  const { question, files, apiKey, proxyUrl, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'meta-llama/Llama-3.2-11B-Vision-Instruct' } = request;
+  const { question, files, apiKey, proxyUrl, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'meta-llama/Llama-3.2-3B-Instruct' } = request;
   
   try {
+    console.log('handleQuestionRequest start', {
+      questionLength: question?.length || 0,
+      fileCount: files?.length || 0,
+      useLocalLLM,
+      hfModel
+    });
     // Validate inputs
     if (!question) {
       throw new Error('Question is required');
@@ -585,9 +607,7 @@ async function handleQuestionRequest(request, sendResponse) {
       ragContext = await buildRagContext(
         question,
         extractionResult.documents,
-        apiKey,
-        useLocalLLM,
-        localModelName
+        apiKey
       );
     } catch (ragError) {
       console.warn('RAG indexing failed, falling back to full text:', ragError);
@@ -608,12 +628,14 @@ async function handleQuestionRequest(request, sendResponse) {
       hfModel
     );
     
+    console.log('handleQuestionRequest success, answer length:', answer?.length || 0);
     sendResponse({
       success: true,
       answer: answer
     });
   } catch (error) {
     console.error('Error in askQuestion:', error);
+    console.log('handleQuestionRequest failure sending response');
     sendResponse({
       success: false,
       error: error.message || 'An unknown error occurred'
@@ -690,8 +712,11 @@ async function extractFromDataURL(dataUrl, fileType, fileName) {
       console.log('✓ PDF detected - extracting text');
 
       try {
-        const arrayBuffer = await blob.arrayBuffer();
-        const text = await extractPDFText(arrayBuffer);
+        const text = await sendMessageToOffscreen({
+          action: 'extractPDFText',
+          pdfDataUrl: dataUrl,
+          fileName: fileName
+        });
         if (text && text.length > 50) {
           console.log(`✓ Fallback: Successfully extracted ${text.length} chars from PDF`);
           return text;
@@ -711,8 +736,11 @@ async function extractFromDataURL(dataUrl, fileType, fileName) {
     if (fileName.toLowerCase().endsWith('.pdf')) {
       console.log('File ends in .pdf but type not recognized, attempting PDF extraction anyway');
       try {
-        const arrayBuffer = await blob.arrayBuffer();
-        const text = await extractPDFText(arrayBuffer);
+        const text = await sendMessageToOffscreen({
+          action: 'extractPDFText',
+          pdfDataUrl: dataUrl,
+          fileName: fileName
+        });
         if (text && text.length > 50) {
           console.log(`✓ Successfully extracted ${text.length} chars from PDF (via fallback)`);
           return text;
@@ -752,7 +780,7 @@ async function extractPDFText(arrayBuffer) {
   }
   
   try {
-    console.log('Attempting PDF text extraction (image conversion not available in service worker)');
+    console.log('Attempting PDF text extraction (service worker context)');
     
     const loadingTask = pdfjsLib.getDocument({ 
       data: arrayBuffer,
@@ -812,7 +840,10 @@ async function fetchFileContent(url) {
     return await response.text();
   } else if (contentType && contentType.includes('pdf')) {
     const arrayBuffer = await response.arrayBuffer();
-    const text = await extractPDFText(arrayBuffer);
+    const text = await sendMessageToOffscreen({
+      action: 'extractPDFText',
+      arrayBuffer
+    });
     return text;
   } else if (contentType && contentType.includes('word')) {
     return 'Word document detected. Add mammoth.js library to extract full text.';
@@ -853,15 +884,14 @@ function trimContextToTokenLimit(context, maxTokens = 12000) {
 }
 
 const VECTOR_STORE_KEY = 'vectorStore';
-const VECTOR_STORE_VERSION = 1;
-const DEFAULT_EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2';
-const LOCAL_EMBEDDING_MODEL = 'nomic-embed-text';
+const VECTOR_STORE_VERSION = 3;
+const EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-8B';
 const RAG_TOP_K = 8;
 const RAG_CHUNK_SIZE = 1200;
 const RAG_CHUNK_OVERLAP = 150;
 const RAG_MAX_CHUNKS_PER_DOC = 80;
 
-async function buildRagContext(question, documents, apiKey, useLocalLLM, localModelName) {
+async function buildRagContext(question, documents, apiKey) {
   const store = await loadVectorStore();
   const fileIdMap = new Map();
   const updatedStore = { ...store, files: { ...(store.files || {}) } };
@@ -877,13 +907,7 @@ async function buildRagContext(question, documents, apiKey, useLocalLLM, localMo
 
     const chunks = chunkTextForEmbeddings(doc.text || '');
     const limitedChunks = chunks.slice(0, RAG_MAX_CHUNKS_PER_DOC);
-    const embeddings = await embedTexts(
-      limitedChunks,
-      apiKey,
-      useLocalLLM,
-      localModelName
-    );
-
+    const embeddings = await embedTexts(limitedChunks, apiKey);
     const chunkEntries = limitedChunks.map((text, index) => ({
       id: `${fileId}::${index}`,
       text,
@@ -902,7 +926,7 @@ async function buildRagContext(question, documents, apiKey, useLocalLLM, localMo
   await saveVectorStore(updatedStore);
 
   const queryEmbedding = normalizeEmbedding(
-    (await embedTexts([question], apiKey, useLocalLLM, localModelName))[0] || []
+    (await embedTexts([question], apiKey))[0] || []
   );
   const scored = [];
 
@@ -910,11 +934,10 @@ async function buildRagContext(question, documents, apiKey, useLocalLLM, localMo
     const entry = updatedStore.files[fileId];
     if (!entry || !entry.chunks) continue;
     for (const chunk of entry.chunks) {
-      if (!chunk.embedding || chunk.embedding.length === 0) continue;
       scored.push({
         fileName: entry.fileName || doc.fileName,
         text: chunk.text,
-        score: cosineSimilarity(queryEmbedding, chunk.embedding)
+        score: cosineSimilarity(queryEmbedding, chunk.embedding || [])
       });
     }
   }
@@ -940,49 +963,17 @@ function chunkTextForEmbeddings(text) {
   return chunks;
 }
 
-async function embedTexts(texts, apiKey, useLocalLLM, localModelName) {
+async function embedTexts(texts, apiKey) {
   if (!texts || texts.length === 0) return [];
-  if (useLocalLLM) {
-    await ensureOllamaModel(LOCAL_EMBEDDING_MODEL);
-    const results = [];
-    for (const text of texts) {
-      const embedding = await callOllamaEmbedding(LOCAL_EMBEDDING_MODEL, text);
-      results.push(embedding || []);
-    }
-    return results;
-  }
   if (!apiKey) {
-    throw new Error('Hugging Face API key required for embeddings in non-local mode.');
+    throw new Error('Hugging Face API key required for embeddings.');
   }
   return callHuggingFaceEmbeddings(texts, apiKey);
 }
 
 async function callHuggingFaceEmbeddings(texts, apiKey) {
-  const routerEndpoint = 'https://router.huggingface.co/v1/embeddings';
-  const routerResponse = await fetch(routerEndpoint, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    method: 'POST',
-    body: JSON.stringify({
-      model: DEFAULT_EMBEDDING_MODEL,
-      input: texts
-    })
-  });
-
-  if (routerResponse.ok) {
-    const data = await routerResponse.json();
-    return parseEmbeddingResponse(data, texts.length);
-  }
-
-  const routerErrorText = await routerResponse.text().catch(() => '');
-  if (routerResponse.status !== 404) {
-    throw new Error(`Embedding API error (${routerResponse.status}): ${routerErrorText || routerResponse.statusText}`);
-  }
-
-  const pipelineEndpoint = `https://router.huggingface.co/hf/feature-extraction/${DEFAULT_EMBEDDING_MODEL}`;
-  const pipelineResponse = await fetch(pipelineEndpoint, {
+  const endpoint = `https://router.huggingface.co/hf-inference/models/${EMBEDDING_MODEL}/pipeline/feature-extraction`;
+  const response = await fetch(endpoint, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
@@ -994,20 +985,16 @@ async function callHuggingFaceEmbeddings(texts, apiKey) {
     })
   });
 
-  if (!pipelineResponse.ok) {
-    const errorText = await pipelineResponse.text().catch(() => '');
-    throw new Error(`Embedding API error (${pipelineResponse.status}): ${errorText || pipelineResponse.statusText}`);
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Embedding API error (${response.status}): ${errorText || response.statusText}`);
   }
 
-  const data = await pipelineResponse.json();
+  const data = await response.json();
   return parseEmbeddingResponse(data, texts.length);
 }
 
 function parseEmbeddingResponse(data, expectedCount) {
-  if (data && Array.isArray(data.data)) {
-    return data.data.map(item => (Array.isArray(item.embedding) ? item.embedding : []));
-  }
-
   if (!Array.isArray(data)) {
     return Array.from({ length: expectedCount }, () => []);
   }
@@ -1093,21 +1080,7 @@ async function saveVectorStore(store) {
   });
 }
 
-async function callOllamaEmbedding(model, prompt) {
-  const resp = await fetch('http://localhost:11434/api/embeddings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt })
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`Ollama embedding error (${resp.status}): ${text || resp.statusText}`);
-  }
-  const result = await resp.json();
-  return result?.embedding || null;
-}
-
-async function callLlamaLLMWithRetry(question, ragContext, apiKey, maxRetries = 3, proxyUrl = null, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'meta-llama/Llama-3.2-11B-Vision-Instruct') {
+async function callLlamaLLMWithRetry(question, ragContext, apiKey, maxRetries = 3, proxyUrl = null, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'meta-llama/Llama-3.2-3B-Instruct') {
   let lastError;
   
   console.log(`\n=== BUILDING PROMPT ===`);
