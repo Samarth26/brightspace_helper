@@ -272,18 +272,30 @@ async function handlePDFConversion(pdfDataUrl, fileName) {
 async function extractPDFTextFromMessage(message) {
   await ensurePdfJsReady();
 
-  let arrayBuffer;
+  let pdfData = null;
   if (message.arrayBuffer) {
-    arrayBuffer = message.arrayBuffer;
-  } else if (message.pdfDataUrl) {
+    if (message.arrayBuffer instanceof ArrayBuffer) {
+      pdfData = message.arrayBuffer;
+    } else if (ArrayBuffer.isView(message.arrayBuffer)) {
+      pdfData = message.arrayBuffer;
+    } else if (Array.isArray(message.arrayBuffer)) {
+      pdfData = new Uint8Array(message.arrayBuffer);
+    } else if (message.arrayBuffer?.data && Array.isArray(message.arrayBuffer.data)) {
+      pdfData = new Uint8Array(message.arrayBuffer.data);
+    }
+  }
+
+  if (!pdfData && message.pdfDataUrl) {
     const response = await fetch(message.pdfDataUrl);
-    arrayBuffer = await response.arrayBuffer();
-  } else {
+    pdfData = await response.arrayBuffer();
+  }
+
+  if (!pdfData) {
     throw new Error('No PDF data provided');
   }
 
   const loadingTask = pdfjsLib.getDocument({
-    data: arrayBuffer,
+    data: pdfData,
     disableWorker: true,
     useWorkerFetch: false,
     useRangeRequests: false

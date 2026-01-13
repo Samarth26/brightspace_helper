@@ -1,18 +1,19 @@
 # Brightspace LLM Assistant - Chrome Extension
 
-A powerful Chrome extension that scans Brightspace course pages for syllabus, assignments, and course materials, then uses open-source Llama LLM from Hugging Face to answer questions about deadlines, grading policies, learning objectives, and more.
+A powerful Chrome extension that lets you upload course materials, then uses an open-source LLM from Hugging Face to answer questions about deadlines, grading policies, learning objectives, and more.
 
 ## Features
 
-- 📚 **Automatic File Scanning**: Detects and extracts all files (PDFs, documents, presentations) from Brightspace pages
-- 🤖 **AI-Powered Answers**: Uses Llama LLM via Hugging Face to answer questions about your course materials
+- 📥 **Drag-and-Drop Uploads**: Upload PDFs and documents directly from the popup
+- 🤖 **AI-Powered Answers**: Uses an open-source LLM via Hugging Face to answer questions about your course materials
 - 💬 **Interactive Chat**: Conversational interface to ask questions about:
   - Assignment and exam deadlines
   - Grading policies and rubrics
   - Course learning objectives
   - Course requirements and policies
   - And more!
-- 💾 **Smart Caching**: Stores scanned files and chat history locally
+- 💾 **Drive-Backed Storage**: Uploads files to Google Drive for future RAG
+- 🧠 **Optional Vector API**: Store embeddings in MongoDB Atlas and query top-K chunks
 - 🔒 **Private**: Processes files locally; only sends text summaries to the LLM API
 
 ## Prerequisites
@@ -21,7 +22,12 @@ A powerful Chrome extension that scans Brightspace course pages for syllabus, as
 2. **Hugging Face API Key** (free tier available)
    - Sign up at [huggingface.co](https://huggingface.co)
    - Get your API key from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-   - Accept the terms for the selected Llama model access
+   - Accept the terms for the selected model access
+3. **Google Drive OAuth Client ID**
+   - Add your client ID to `manifest.json` (`oauth2.client_id`)
+   - Scope used: `https://www.googleapis.com/auth/drive.file`
+4. **(Optional) Vector API Server**
+   - Node.js 18+ recommended for the MongoDB driver
 
 ## Installation
 
@@ -47,20 +53,20 @@ cd /Users/parkhiagarwal/Downloads/LMS
 
 ## Usage
 
-### Scanning Brightspace for Files
+### Uploading Files
 
-1. Navigate to a Brightspace course page (Content, Syllabus, Assessments, etc.)
-2. Click the extension popup icon
-3. Click the **"🔍 Scan This Page"** button
-4. The extension will find and list all documents on the page
+1. Click the extension popup icon
+2. Click **Authorize Drive** when prompted
+3. Drag and drop files into the upload area
+4. Files are uploaded to Google Drive immediately
 
 ### Asking Questions
 
-1. Once files are scanned, type your question in the text area
+1. Once files are uploaded, type your question in the text area
 2. Click **"Ask Question"** or press Shift+Enter
 3. The extension will:
-   - Extract text from the scanned files
-   - Send it to Llama LLM with your question
+   - Extract text from the uploaded files
+   - Send it to the LLM with your question
    - Display the answer in the chat
 
 ### Quick Question Templates
@@ -76,7 +82,6 @@ Use the suggested questions to quickly ask common queries:
 LMS/
 ├── manifest.json          # Extension configuration
 ├── background.js          # Service worker (LLM communication)
-├── content.js             # Page scanning script
 ├── popup.html             # Extension UI
 ├── popup.js               # Popup logic
 ├── popup.css              # Styling
@@ -90,21 +95,17 @@ LMS/
 
 ## How It Works
 
-1. **Content Script** (`content.js`):
-   - Runs on Brightspace pages
-   - Scans the DOM for file links
-   - Extracts file URLs, names, and types
-
-2. **Background Service Worker** (`background.js`):
+1. **Background Service Worker** (`background.js`):
    - Receives questions from the popup
-   - Fetches and extracts text from files
+   - Fetches and extracts text from uploaded files
    - Creates a context-aware prompt
-   - Calls Hugging Face API with Llama model
+   - Calls Hugging Face API with the selected model
    - Returns answers to the popup
 
-3. **Popup UI** (`popup.html`, `popup.js`, `popup.css`):
+2. **Popup UI** (`popup.html`, `popup.js`, `popup.css`):
    - User interface for interacting with the extension
-   - Displays scanned files
+   - Uploads files to Google Drive
+   - Displays uploaded files
    - Chat interface for questions and answers
    - Stores API key securely in Chrome storage
 
@@ -112,19 +113,35 @@ LMS/
 
 ### Default Model
 The extension uses a small language model (SLM) by default via Hugging Face Inference API:
-- `meta-llama/Llama-3.2-3B-Instruct`
+- `google/gemma-2-2b-it`
 
-### Other Available Llama Models
+### Other Available Models
 You can modify `background.js` to use alternative models:
-- `meta-llama/Llama-3.2-11B-Vision-Instruct` (larger, more capable)
 - `meta-llama/Llama-3.1-8B-Instruct` (balanced speed/quality)
-- Other open-source models available on Hugging Face
+- `mistralai/Mistral-7B-Instruct-v0.3` (strong general-purpose)
+- Other open-source text-only models available on Hugging Face
 
 ### RAG & Embeddings
 The extension uses a lightweight RAG pipeline to ground answers in your course files:
 - Embeddings model: `Qwen/Qwen3-Embedding-8B` via Hugging Face Router
 - Chunking: 1200 characters with 150 overlap
 - Retrieval: top 8 chunks per query
+- Vector store: saved to `vector-store.json` in your Google Drive folder `Brightspace LLM Assistant`
+
+### Optional Vector API (MongoDB Atlas)
+You can store embeddings in MongoDB Atlas and retrieve top-K chunks via a local API server.
+
+1. Set up a vector index in MongoDB Atlas on the `embedding` field.
+2. Configure the server:
+   - Copy `server/.env.example` to `server/.env`
+   - Set `MONGODB_URI`, `MONGODB_DB`, `MONGODB_COLLECTION`, and `VECTOR_INDEX_NAME`
+3. Start the server:
+   - `cd server && npm install`
+   - `npm start`
+4. In the extension popup, set **Vector API URL** (e.g., `http://localhost:3000/api`).
+5. If you set `API_KEY` in `server/.env`, set the same value in **Vector API key** in the popup.
+
+When the Vector API URL is set, the extension stores embeddings in MongoDB and queries top-K chunks from the API.
 
 ### Local Alternative (Ollama)
 For completely private inference without API keys:
@@ -132,18 +149,13 @@ For completely private inference without API keys:
 1. Install [Ollama](https://ollama.ai)
 2. Run `ollama pull llama3.2:3b-instruct`
 3. Start Ollama: `ollama serve`
-4. Uncomment `callLlamaLLMLocal()` in `background.js`
+4. Enable local mode in the popup and set the model name
 
 ## Troubleshooting
 
-### "Unable to scan this page"
-- Make sure you're on an actual Brightspace page (*.brightspace.com or *.d2l.com)
-- The page needs to be fully loaded
-- Check browser console (F12) for errors
-
 ### API Key errors
 - Verify your Hugging Face API key is correct
-- Make sure you have accepted the Llama model terms on Hugging Face
+- Make sure you have accepted the selected model terms on Hugging Face
 - Check that your free tier account has API access active
 
 ### No response from LLM
@@ -152,15 +164,21 @@ For completely private inference without API keys:
 - Try a simpler question first
 - Check Hugging Face service status
 
-### Files not detected
-- Some Brightspace pages use dynamic loading
-- Wait a few seconds after page loads before scanning
-- Try refreshing the page and scanning again
-- Check browser console for any blocked requests
+### Drive upload issues
+- Make sure you authorized Google Drive in the popup
+- Check browser console (F12) for OAuth errors
+- Verify your OAuth client ID in `manifest.json`
+
+### Vector API errors
+- `Invalid API key`: Set **Vector API key** in the popup to match `API_KEY` in `server/.env`, or remove `API_KEY` to disable auth.
+- `Failed to connect to MongoDB`: Double-check `MONGODB_URI` credentials and Atlas IP allowlist.
 
 ## Privacy & Security
 
-- ✅ Files are processed locally in your browser
+- ✅ Files are processed locally for text extraction
+- ✅ Uploaded files are stored in your Google Drive folder `Brightspace LLM Assistant`
+- ✅ Vector index is stored in `vector-store.json` in the same Drive folder (if Vector API URL is not set)
+- ✅ Vector API mode stores embeddings in MongoDB Atlas
 - ✅ API key is stored only in Chrome local storage
 - ✅ Only text content is sent to the LLM API
 - ⚠️ Your Hugging Face API key is visible to Hugging Face services
@@ -210,8 +228,8 @@ For issues or questions:
 
 - [Chrome Extension Documentation](https://developer.chrome.com/docs/extensions/)
 - [Hugging Face API Docs](https://huggingface.co/docs/api-inference/index)
-- [Llama Model Card](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)
-- [Brightspace API (if needed)](https://docs.brightspace.com/en/content/integrations/rest/overview.htm)
+- [Gemma Model Card](https://huggingface.co/google/gemma-2-2b-it)
+- [Google Drive API](https://developers.google.com/drive/api/guides/about-sdk)
 
 ## Disclaimer
 

@@ -15,14 +15,13 @@
     
     <div class="status-section">
       <div id="fileCount" class="status-box">
-        <span class="label">Files Found:</span>
+        <span class="label">Files Uploaded:</span>
         <span id="fileCountValue" class="value">0</span>
       </div>
-      <button id="scanButton" class="btn btn-secondary">🔍 Scan This Page</button>
     </div>
     
     <div class="upload-section">
-      <h3>📥 Or Drop Files Here</h3>
+      <h3>📥 Drop Files Here</h3>
       <div id="dropZone" class="drop-zone">
         <p>Drag & drop files here</p>
         <p class="drop-hint">PDF, DOCX, PPTX, TXT</p>
@@ -44,29 +43,34 @@
        <label for="modelSelect">HuggingFace Model:</label>
        <div class="input-group">
         <select id="modelSelect" style="flex:1;padding:8px;border:1px solid #ffc107;border-radius:4px;font-size:13px;">
-          <option value="meta-llama/Llama-3.3-70B-Instruct">Llama 3.3 70B ⚡ (Auto)</option>
-          <option value="meta-llama/Llama-3.3-70B-Instruct:groq">Llama 3.3 70B (Groq)</option>
-          <option value="meta-llama/Llama-3.2-11B-Vision-Instruct">Llama 3.2 11B Vision (Images)</option>
-          <option value="meta-llama/Llama-3.2-90B-Vision-Instruct">Llama 3.2 90B Vision (Images)</option>
-          <option value="Qwen/Qwen2-VL-7B-Instruct">Qwen2-VL 7B (Images)</option>
-          <option value="Qwen/Qwen2-VL-2B-Instruct">Qwen2-VL 2B (Images)</option>
-          <option value="Qwen/Qwen3-VL-8B-Instruct">Qwen3-VL 8B (Images)</option>
-          <option value="llava-hf/llava-1.5-7b-hf">LLaVA 1.5 7B (Images)</option>
-          <option value="google/gemma-3-27b-it">Gemma 3 27B (Images)</option>
-          <option value="google/gemma-3-27b-it:nebius">Gemma 3 27B (Nebius, Images)</option>
-          <option value="meta-llama/Llama-2-70b-chat-hf">Llama 2 70B</option>
-          <option value="mistralai/Mistral-7B-Instruct-v0.1">Mistral 7B</option>
+          <option value="google/gemma-2-2b-it">Gemma 2 2B (Default)</option>
+          <option value="meta-llama/Llama-3.1-8B-Instruct">Llama 3.1 8B</option>
+          <option value="mistralai/Mistral-7B-Instruct-v0.3">Mistral 7B</option>
         </select>
          <button id="saveModel" class="btn btn-small">Save</button>
        </div>
        <div id="modelStatus" class="status-message"></div>
-     </div>    <div class="api-key-section">
+     </div>
+    <div class="api-key-section">
       <label for="proxyUrl">CORS Proxy URL (optional):</label>
       <div class="input-group">
         <input type="text" id="proxyUrl" placeholder="e.g. http://localhost:3001/hf">
         <button id="saveProxyUrl" class="btn btn-small">Save</button>
       </div>
       <div id="proxyStatus" class="status-message"></div>
+    </div>
+
+    <div class="api-key-section">
+      <label for="vectorApiUrl">Vector API URL (optional):</label>
+      <div class="input-group">
+        <input type="text" id="vectorApiUrl" placeholder="e.g. http://localhost:3000/api">
+        <button id="saveVectorApiUrl" class="btn btn-small">Save</button>
+      </div>
+      <div class="input-group">
+        <input type="password" id="vectorApiKey" placeholder="Vector API key (optional)">
+        <button id="saveVectorApiKey" class="btn btn-small">Save</button>
+      </div>
+      <div id="vectorApiStatus" class="status-message"></div>
     </div>
 
     <div class="api-key-section">
@@ -89,9 +93,9 @@
     </div>
     
     <div class="files-section">
-      <h3>📄 Scanned Files</h3>
+      <h3>📄 Uploaded Files</h3>
       <div id="filesList" class="files-list">
-        <p class="empty-state">No files scanned yet. Visit a Brightspace course page and click "Scan This Page".</p>
+        <p class="empty-state">No files uploaded yet. Drop files above to get started.</p>
       </div>
       <button id="clearFiles" class="btn btn-danger btn-small">Clear All Files</button>
     </div>
@@ -100,6 +104,7 @@
       <label>Google Drive Sync:</label>
       <div class="input-group">
         <button id="driveAuth" class="btn btn-small">☁️ Authorize Drive</button>
+        <button id="driveReset" class="btn btn-small" style="flex:1;background:#6c757d;">↺ Reset Auth</button>
         <button id="backupToDrive" class="btn btn-small" style="flex:1;background:#28a745;">💾 Backup</button>
         <button id="restoreFromDrive" class="btn btn-small" style="flex:1;background:#007bff;">⬇️ Restore</button>
       </div>

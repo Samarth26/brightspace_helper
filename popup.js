@@ -2,12 +2,15 @@
 
 let scannedFiles = [];
 let chatHistory = [];
+let uploadInProgress = false;
+const DRIVE_FOLDER_NAME = 'Brightspace LLM Assistant';
 
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
   await loadApiKey();
   await loadHFModel();
   await loadProxyUrl();
+  await loadVectorApiSettings();
   await loadLocalModelSettings();
   await loadScannedFiles();
   await loadChatHistory();
@@ -27,7 +30,7 @@ async function loadApiKey() {
 // Load HF model from storage
 async function loadHFModel() {
   chrome.storage.local.get(['hfModel'], (result) => {
-    const model = result.hfModel || 'meta-llama/Llama-3.2-11B-Vision-Instruct';
+    const model = result.hfModel || 'google/gemma-2-2b-it';
     document.getElementById('modelSelect').value = model;
   });
 }
@@ -46,7 +49,7 @@ function updateModelStatus(message, isError = false) {
   el.className = isError ? 'status-message error' : 'status-message';
 }
 
-// Load scanned files from storage
+// Load uploaded files from storage
 async function loadScannedFiles() {
   chrome.storage.local.get(['scannedFiles'], (result) => {
     scannedFiles = result.scannedFiles || [];
@@ -68,13 +71,15 @@ function setupEventListeners() {
   document.getElementById('saveApiKey').addEventListener('click', saveApiKey);
   document.getElementById('saveModel').addEventListener('click', saveHFModel);
   document.getElementById('saveProxyUrl').addEventListener('click', saveProxyUrl);
+  document.getElementById('saveVectorApiUrl').addEventListener('click', saveVectorApiSettings);
+  document.getElementById('saveVectorApiKey').addEventListener('click', saveVectorApiSettings);
   document.getElementById('saveLocalModel').addEventListener('click', saveLocalModelSettings);
-  document.getElementById('scanButton').addEventListener('click', scanCurrentPage);
   document.getElementById('askButton').addEventListener('click', askQuestion);
   document.getElementById('clearFiles').addEventListener('click', clearAllFiles);
   
   // Google Drive sync
   document.getElementById('driveAuth').addEventListener('click', authenticateGoogleDrive);
+  document.getElementById('driveReset').addEventListener('click', resetDriveAuth);
   document.getElementById('backupToDrive').addEventListener('click', backupToDrive);
   document.getElementById('restoreFromDrive').addEventListener('click', restoreFromDrive);
 
@@ -163,6 +168,37 @@ function updateProxyStatus(message, isError) {
   el.className = isError ? 'status-message error' : 'status-message';
 }
 
+// Load vector API settings from storage
+async function loadVectorApiSettings() {
+  chrome.storage.local.get(['vectorApiUrl', 'vectorApiKey'], (result) => {
+    if (result.vectorApiUrl) {
+      document.getElementById('vectorApiUrl').value = result.vectorApiUrl;
+      updateVectorApiStatus('Vector API URL loaded ✓', false);
+    }
+    if (result.vectorApiKey) {
+      document.getElementById('vectorApiKey').value = result.vectorApiKey;
+    }
+  });
+}
+
+function saveVectorApiSettings() {
+  const vectorApiUrl = document.getElementById('vectorApiUrl').value.trim();
+  const vectorApiKey = document.getElementById('vectorApiKey').value.trim();
+
+  chrome.storage.local.set({ vectorApiUrl, vectorApiKey }, () => {
+    updateVectorApiStatus(
+      vectorApiUrl ? 'Vector API settings saved ✓' : 'Vector API cleared',
+      false
+    );
+  });
+}
+
+function updateVectorApiStatus(message, isError) {
+  const el = document.getElementById('vectorApiStatus');
+  el.textContent = message;
+  el.className = isError ? 'status-message error' : 'status-message';
+}
+
 // Load local model settings from storage
 async function loadLocalModelSettings() {
   chrome.storage.local.get(['useLocalLLM', 'localModelName'], (result) => {
@@ -195,13 +231,18 @@ function updateLocalModelStatus(message, isError = false) {
 }
 
 // Handle file upload (drag-and-drop or file input)
-function handleFileUpload(files) {
+async function handleFileUpload(files) {
   const uploadStatus = document.getElementById('uploadStatus');
   
   console.log('handleFileUpload called with', files.length, 'files');
   
   if (!files || files.length === 0) {
     updateUploadStatus('No files selected', true);
+    return;
+  }
+
+  if (uploadInProgress) {
+    updateUploadStatus('Upload in progress. Please wait...', true);
     return;
   }
   
@@ -225,64 +266,60 @@ function handleFileUpload(files) {
     return;
   }
   
-  updateUploadStatus(`Reading ${validFiles.length} file(s)...`, false);
+  uploadInProgress = true;
+  updateUploadStatus(`Uploading ${validFiles.length} file(s) to Drive...`, false);
   
-  // Process files
-  const uploadedFiles = [];
-  let processed = 0;
-  
-  validFiles.forEach((file, index) => {
-    const reader = new FileReader();
-    
-    reader.onload = (e) => {
-      console.log(`File ${index + 1}/${validFiles.length} loaded:`, file.name, 'Size:', e.target.result.length);
-      
+  try {
+    const token = await getDriveToken(true);
+    if (!token) {
+      updateUploadStatus('Drive authorization required to upload files.', true);
+      uploadInProgress = false;
+      return;
+    }
+
+    const uploadedFiles = [];
+    let processed = 0;
+
+    for (const file of validFiles) {
+      updateUploadStatus(`Uploading ${processed + 1}/${validFiles.length}: ${file.name}`, false);
+      const driveFileId = await uploadFileToDrive(token, file);
       const fileRecord = {
-        url: `local-file://${file.name}`,
+        url: `drive-file://${driveFileId}`,
         name: file.name,
         type: getFileTypeFromName(file.name),
         size: file.size,
-        content: e.target.result, // File content as data URL
+        driveFileId,
+        driveMimeType: file.type || 'application/octet-stream',
         timestamp: new Date().toISOString(),
-        via: 'manual-upload'
+        via: 'drive-upload'
       };
-      
       uploadedFiles.push(fileRecord);
-      processed++;
-      
-      console.log(`Processed ${processed}/${validFiles.length} files`);
-      
-      if (processed === validFiles.length) {
-        // Save uploaded files to storage
-        chrome.storage.local.get(['scannedFiles'], (result) => {
-          const existing = result.scannedFiles || [];
-          const updated = [...existing, ...uploadedFiles];
-          const unique = Array.from(
-            new Map(updated.map(f => [f.url, f])).values()
-          );
-          
-          console.log('Saving to chrome.storage:', unique.length, 'total files');
-          
-          chrome.storage.local.set({ scannedFiles: unique }, () => {
-            scannedFiles = unique;
-            updateFilesList();
-            updateFileCount();
-            updateUploadStatus(`✓ Loaded ${uploadedFiles.length} file(s)`, false);
-            console.log('Upload complete!');
-          });
-        });
-      }
-    };
-    
-    reader.onerror = () => {
-      console.error(`Error reading ${file.name}`);
-      updateUploadStatus(`Error reading ${file.name}`, true);
-    };
-    
-    // Read file as data URL (supports all types)
-    console.log(`Starting to read file: ${file.name}`);
-    reader.readAsDataURL(file);
-  });
+      processed += 1;
+    }
+
+    chrome.storage.local.get(['scannedFiles'], (result) => {
+      const existing = result.scannedFiles || [];
+      const updated = [...existing, ...uploadedFiles];
+      const unique = Array.from(
+        new Map(updated.map(f => [f.driveFileId || f.url, f])).values()
+      );
+
+      console.log('Saving to chrome.storage:', unique.length, 'total files');
+
+      chrome.storage.local.set({ scannedFiles: unique }, () => {
+        scannedFiles = unique;
+        updateFilesList();
+        updateFileCount();
+        updateUploadStatus(`✓ Uploaded ${uploadedFiles.length} file(s) to Drive`, false);
+        console.log('Upload complete!');
+      });
+    });
+  } catch (error) {
+    console.error('Upload failed:', error);
+    updateUploadStatus(`Upload failed: ${error.message}`, true);
+  } finally {
+    uploadInProgress = false;
+  }
 }
 
 // Get file type from filename
@@ -310,40 +347,12 @@ function updateApiKeyStatus(message, isError) {
   statusEl.className = isError ? 'status-message error' : 'status-message';
 }
 
-// Scan current page for files
-async function scanCurrentPage() {
-  const button = document.getElementById('scanButton');
-  button.disabled = true;
-  button.textContent = '🔍 Scanning...';
-  
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    chrome.tabs.sendMessage(tab.id, { action: 'scanPage' }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error(chrome.runtime.lastError);
-        alert('Unable to scan this page. Make sure you are on a Brightspace page.');
-      } else if (response && response.success) {
-        loadScannedFiles();
-        alert(`Found ${response.files.length} files on this page!`);
-      }
-      
-      button.disabled = false;
-      button.textContent = '🔍 Scan This Page';
-    });
-  } catch (error) {
-    console.error('Error scanning page:', error);
-    button.disabled = false;
-    button.textContent = '🔍 Scan This Page';
-  }
-}
-
 // Update files list display
 function updateFilesList() {
   const filesList = document.getElementById('filesList');
   
   if (scannedFiles.length === 0) {
-    filesList.innerHTML = '<p class="empty-state">No files scanned yet. Visit a Brightspace course page and click "Scan This Page".</p>';
+    filesList.innerHTML = '<p class="empty-state">No files uploaded yet. Drop files above to get started.</p>';
     return;
   }
   
@@ -378,7 +387,7 @@ function updateFileCount() {
 
 // Clear all files
 function clearAllFiles() {
-  if (confirm('Are you sure you want to clear all scanned files?')) {
+  if (confirm('Are you sure you want to clear all uploaded files?')) {
     chrome.storage.local.set({ scannedFiles: [] }, () => {
       scannedFiles = [];
       updateFilesList();
@@ -404,8 +413,13 @@ async function askQuestion() {
     return;
   }
   
+  if (uploadInProgress) {
+    alert('File upload in progress. Please wait until uploads finish.');
+    return;
+  }
+
   if (scannedFiles.length === 0) {
-    alert('No files scanned yet. Please scan a Brightspace page first.');
+    alert('No files uploaded yet. Please drop files before asking a question.');
     return;
   }
   
@@ -425,7 +439,21 @@ async function askQuestion() {
   try {
     // Send to background script for processing
     const proxyUrl = document.getElementById('proxyUrl').value.trim();
+    const vectorApiUrl = document.getElementById('vectorApiUrl').value.trim();
+    const vectorApiKey = document.getElementById('vectorApiKey').value.trim();
     const hfModel = document.getElementById('modelSelect').value;
+    let driveAccessToken = null;
+    if (scannedFiles.some(file => file.driveFileId)) {
+      driveAccessToken = await getDriveToken(false);
+      if (!driveAccessToken) {
+        alert('Please authorize Google Drive to access uploaded files.');
+        button.disabled = false;
+        buttonText.classList.remove('hidden');
+        spinner.classList.add('hidden');
+        return;
+      }
+    }
+
     console.log('Sending askQuestion to background:', {
       questionLength: question.length,
       fileCount: scannedFiles.length,
@@ -434,40 +462,44 @@ async function askQuestion() {
       hfModel
     });
     const timeoutId = setTimeout(() => {
-      console.error('askQuestion timeout: no response from background after 30s');
+      console.error('askQuestion timeout: no response from background after 120s');
       addMessageToChat('assistant', 'Error: No response from background service worker.');
       button.disabled = false;
       buttonText.classList.remove('hidden');
       spinner.classList.add('hidden');
-    }, 30000);
+    }, 120000);
 
-    chrome.runtime.sendMessage({
+    const port = chrome.runtime.connect({ name: 'askQuestion' });
+    const request = {
       action: 'askQuestion',
       question: question,
       files: scannedFiles,
       apiKey: apiKey,
+      driveAccessToken: driveAccessToken,
       proxyUrl: proxyUrl || null,
+      vectorApiUrl: vectorApiUrl || null,
+      vectorApiKey: vectorApiKey || null,
       useLocalLLM: useLocalLLM,
       localModelName: localModelName || 'llama3.2:3b-instruct',
       hfModel: hfModel
-    }, (response) => {
+    };
+
+    port.onMessage.addListener((response) => {
       clearTimeout(timeoutId);
-      if (chrome.runtime.lastError) {
-        console.error('askQuestion runtime error:', chrome.runtime.lastError);
-      } else {
-        console.log('askQuestion response:', response);
-      }
+      console.log('askQuestion response:', response);
       if (response && response.success) {
         addMessageToChat('assistant', response.answer);
       } else {
         addMessageToChat('assistant', `Error: ${response?.error || 'Unknown error occurred'}`);
       }
-      
-      // Reset button
+
       button.disabled = false;
       buttonText.classList.remove('hidden');
       spinner.classList.add('hidden');
+      port.disconnect();
     });
+
+    port.postMessage(request);
   } catch (error) {
     console.error('Error asking question:', error);
     addMessageToChat('assistant', `Error: ${error.message}`);
@@ -524,7 +556,7 @@ function escapeHtml(text) {
 
 async function authenticateGoogleDrive() {
   try {
-    const token = await chrome.identity.getAuthToken({ interactive: true });
+    const token = await getDriveToken(true);
     if (token) {
       chrome.storage.local.set({ googleAccessToken: token });
       updateDriveStatus('✓ Google Drive authorized', false);
@@ -534,9 +566,24 @@ async function authenticateGoogleDrive() {
   }
 }
 
+async function resetDriveAuth() {
+  try {
+    const tokenValue = await getDriveToken(false);
+    const token = typeof tokenValue === 'string' ? tokenValue : tokenValue?.token;
+    if (token) {
+      await chrome.identity.removeCachedAuthToken({ token });
+    }
+    chrome.storage.local.remove(['googleAccessToken'], () => {
+      updateDriveStatus('Drive auth reset. Please authorize again.', false);
+    });
+  } catch (error) {
+    updateDriveStatus(`Reset failed: ${error.message}`, true);
+  }
+}
+
 async function backupToDrive() {
   try {
-    const token = await chrome.identity.getAuthToken({ interactive: false });
+    const token = await getDriveToken(false);
     if (!token) {
       updateDriveStatus('Not authorized. Click "Authorize Drive" first.', true);
       return;
@@ -568,7 +615,7 @@ async function backupToDrive() {
 
 async function restoreFromDrive() {
   try {
-    const token = await chrome.identity.getAuthToken({ interactive: false });
+    const token = await getDriveToken(false);
     if (!token) {
       updateDriveStatus('Not authorized. Click "Authorize Drive" first.', true);
       return;
@@ -606,9 +653,14 @@ async function restoreFromDrive() {
 
 async function findOrCreateDriveFile(token, fileName) {
   try {
+    const folderId = await ensureDriveFolderId(token);
+    if (!folderId) {
+      throw new Error('Could not access Drive folder.');
+    }
+
     // Search for existing file
-    const query = `name='${fileName}' and trashed=false and mimeType='application/json'`;
-    const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&spaces=appDataFolder`;
+    const query = `name='${fileName}' and '${folderId}' in parents and trashed=false and mimeType='application/json'`;
+    const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name)`;
     
     const searchResp = await fetch(searchUrl, {
       headers: { Authorization: `Bearer ${token}` }
@@ -625,10 +677,10 @@ async function findOrCreateDriveFile(token, fileName) {
     const metadata = {
       name: fileName,
       mimeType: 'application/json',
-      parents: ['appDataFolder']
+      parents: [folderId]
     };
     
-    const createResp = await fetch('https://www.googleapis.com/drive/v3/files?uploadType=multipart', {
+    const createResp = await fetch('https://www.googleapis.com/drive/v3/files', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -702,4 +754,93 @@ function updateDriveStatus(message, isError = false) {
   const el = document.getElementById('driveStatus');
   el.textContent = message;
   el.className = isError ? 'status-message error' : 'status-message ok';
+}
+
+async function ensureDriveFolderId(token) {
+  const query = `name='${DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name)`;
+  const searchResp = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (searchResp.ok) {
+    const searchData = await searchResp.json();
+    if (searchData.files && searchData.files.length > 0) {
+      return searchData.files[0].id;
+    }
+  } else {
+    const errorText = await searchResp.text().catch(() => '');
+    throw new Error(`Drive folder search failed (${searchResp.status}): ${errorText || searchResp.statusText}`);
+  }
+
+  const metadata = {
+    name: DRIVE_FOLDER_NAME,
+    mimeType: 'application/vnd.google-apps.folder'
+  };
+  const createResp = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(metadata)
+  });
+
+  if (!createResp.ok) {
+    const errorText = await createResp.text().catch(() => '');
+    throw new Error(`Drive folder create failed (${createResp.status}): ${errorText || createResp.statusText}`);
+  }
+  const created = await createResp.json();
+  return created.id || null;
+}
+
+async function getDriveToken(interactive) {
+  try {
+    const tokenValue = await chrome.identity.getAuthToken({ interactive });
+    const token = typeof tokenValue === 'string' ? tokenValue : tokenValue?.token;
+    if (token) {
+      chrome.storage.local.set({ googleAccessToken: token });
+    }
+    return token || null;
+  } catch (error) {
+    updateDriveStatus(`Drive auth error: ${error.message}`, true);
+    return null;
+  }
+}
+
+async function uploadFileToDrive(token, file) {
+  const folderId = await ensureDriveFolderId(token);
+  if (!folderId) {
+    throw new Error('Could not access Drive folder.');
+  }
+
+  const metadata = {
+    name: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    parents: [folderId]
+  };
+
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', file);
+
+  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`
+    },
+    body: form
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Drive upload failed (${response.status}): ${errorText || response.statusText}`);
+  }
+
+  const data = await response.json();
+  if (!data.id) {
+    throw new Error('Drive upload failed: missing file ID');
+  }
+
+  return data.id;
 }

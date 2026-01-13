@@ -495,84 +495,53 @@ async function sendMessageToOffscreenPort(message) {
   }
 }
 
-// Helper to send messages to the active tab's content script
-async function findPdfCapableTabId() {
-  const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const activeTab = activeTabs && activeTabs[0];
-  if (activeTab && typeof activeTab.id === 'number') {
-    return activeTab.id;
-  }
-
-  const candidateTabs = await chrome.tabs.query({
-    url: [
-      '*://*.brightspace.com/*',
-      '*://*.d2l.com/*',
-      '*://*.nyu.edu/*'
-    ]
-  });
-  const candidate = candidateTabs && candidateTabs[0];
-  if (candidate && typeof candidate.id === 'number') {
-    return candidate.id;
-  }
-
-  throw new Error('No tab available with content script for PDF conversion');
-}
-
-async function ensureContentScript(tabId) {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content.js']
-    });
-  } catch (e) {
-    console.warn('Failed to inject content script:', e);
-  }
-}
-
-async function sendMessageToActiveTab(message) {
-  const tabId = await findPdfCapableTabId();
-
-  const send = () => new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (res) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(res);
-    });
-  });
-
-  let response;
-  try {
-    response = await send();
-  } catch (err) {
-    if (err.message && err.message.includes('Receiving end does not exist')) {
-      await ensureContentScript(tabId);
-      response = await send();
-    } else {
-      throw err;
-    }
-  }
-
-  if (!response) {
-    throw new Error('No response from content script');
-  }
-  if (!response.success) {
-    throw new Error(response.error || 'Content script failed');
-  }
-  return response.images;
-}
-
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   console.log('Background received message:', request?.action, 'from', sender?.id || sender?.tab?.id || 'unknown');
   if (request.action === 'askQuestion') {
-    handleQuestionRequest(request, sendResponse);
+    handleQuestionRequest(request)
+      .then((response) => sendResponse(response))
+      .catch((error) => {
+        console.error('Error in askQuestion handler:', error);
+        sendResponse({
+          success: false,
+          error: error.message || 'An unknown error occurred'
+        });
+      });
   }
   return true; // Keep channel open for async response
 });
 
-async function handleQuestionRequest(request, sendResponse) {
-  const { question, files, apiKey, proxyUrl, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'meta-llama/Llama-3.2-3B-Instruct' } = request;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'askQuestion') {
+    return;
+  }
+
+  port.onMessage.addListener((request) => {
+    handleQuestionRequest(request)
+      .then((response) => port.postMessage(response))
+      .catch((error) => {
+        console.error('Error in askQuestion handler (port):', error);
+        port.postMessage({
+          success: false,
+          error: error.message || 'An unknown error occurred'
+        });
+      });
+  });
+});
+
+async function handleQuestionRequest(request) {
+  const {
+    question,
+    files,
+    apiKey,
+    driveAccessToken = null,
+    proxyUrl,
+    vectorApiUrl = null,
+    vectorApiKey = null,
+    useLocalLLM = false,
+    localModelName = 'llama3.2:3b-instruct',
+    hfModel = 'google/gemma-2-2b-it'
+  } = request;
   
   try {
     console.log('handleQuestionRequest start', {
@@ -590,11 +559,11 @@ async function handleQuestionRequest(request, sendResponse) {
     }
     
     if (!files || files.length === 0) {
-      throw new Error('No files available. Please scan a page first.');
+      throw new Error('No files available. Please upload files first.');
     }
     
     // Extract text from files
-    const extractionResult = await extractTextFromFiles(files);
+    const extractionResult = await extractTextFromFiles(files, driveAccessToken);
     
     if (extractionResult.documents.length === 0) {
       throw new Error('Could not extract text from files. Try uploading .txt or text-based PDFs.');
@@ -602,20 +571,38 @@ async function handleQuestionRequest(request, sendResponse) {
     
     console.log(`Successfully extracted text from ${extractionResult.documents.length} file(s)`);
     
+    if (!driveAccessToken) {
+      throw new Error('Google Drive authorization required to load vector store.');
+    }
+
+    console.log('Building RAG context...');
     let ragContext;
     try {
-      ragContext = await buildRagContext(
-        question,
-        extractionResult.documents,
-        apiKey
-      );
+      if (vectorApiUrl) {
+        ragContext = await buildRagContextWithServer(
+          question,
+          extractionResult.documents,
+          apiKey,
+          vectorApiUrl,
+          vectorApiKey
+        );
+      } else {
+        ragContext = await buildRagContext(
+          question,
+          extractionResult.documents,
+          apiKey,
+          driveAccessToken
+        );
+      }
     } catch (ragError) {
       console.warn('RAG indexing failed, falling back to full text:', ragError);
       ragContext = extractionResult.documents
         .map(doc => `[Document: ${doc.fileName}]\n${doc.text}`)
         .join('\n\n---\n\n');
     }
+    console.log('RAG context built, length:', ragContext.length);
     
+    console.log('Calling LLM...');
     // Call LLM with local preference and fallback options
     const answer = await callLlamaLLMWithRetry(
       question,
@@ -628,22 +615,22 @@ async function handleQuestionRequest(request, sendResponse) {
       hfModel
     );
     
+    console.log('LLM call completed');
     console.log('handleQuestionRequest success, answer length:', answer?.length || 0);
-    sendResponse({
+    return {
       success: true,
       answer: answer
-    });
+    };
   } catch (error) {
     console.error('Error in askQuestion:', error);
-    console.log('handleQuestionRequest failure sending response');
-    sendResponse({
+    return {
       success: false,
       error: error.message || 'An unknown error occurred'
-    });
+    };
   }
 }
 
-async function extractTextFromFiles(files) {
+async function extractTextFromFiles(files, driveAccessToken) {
   const documents = [];
   
   console.log(`=== extractTextFromFiles called with ${files.length} files ===`);
@@ -655,8 +642,15 @@ async function extractTextFromFiles(files) {
       console.log(`Processing file: ${file.name}, type: ${file.type}, url: ${file.url}`);
       
       // Check if it's a manually uploaded file with content
-      if (file.content && file.url.startsWith('local-file://')) {
-        console.log(`  → Has content and local-file URL, calling extractFromDataURL`);
+      if (file.driveFileId) {
+        if (!driveAccessToken) {
+          throw new Error('Google Drive authorization required to read uploaded files.');
+        }
+        console.log('  → Drive file detected, downloading from Drive');
+        const blob = await downloadDriveFileBlob(file.driveFileId, driveAccessToken);
+        result = await extractTextFromBlob(blob, file.type, file.name);
+      } else if (file.content && file.url && file.url.startsWith('local-file://')) {
+        console.log('  → Has content and local-file URL, calling extractFromDataURL');
         result = await extractFromDataURL(file.content, file.type, file.name);
       } else {
         console.log(`  → No content or not local-file, calling fetchFileContent`);
@@ -697,81 +691,92 @@ async function extractFromDataURL(dataUrl, fileType, fileName) {
     const response = await fetch(dataUrl);
     const blob = await response.blob();
     
-    console.log(`File: ${fileName}, MIME: ${blob.type}, Size: ${blob.size} bytes`);
-    
-    // For plain text files
-    if (fileType === 'text' || fileName.endsWith('.txt') || blob.type.includes('text/plain')) {
-      console.log('Detected as text file');
-      const text = await blob.text();
-      console.log(`Extracted ${text.length} chars from text file`);
-      return text;
-    }
-    
-    // For PDF files - extract text only (no images)
-    if (fileType === 'pdf' || fileName.endsWith('.pdf') || blob.type.includes('pdf')) {
-      console.log('✓ PDF detected - extracting text');
-
-      try {
-        const text = await sendMessageToOffscreen({
-          action: 'extractPDFText',
-          pdfDataUrl: dataUrl,
-          fileName: fileName
-        });
-        if (text && text.length > 50) {
-          console.log(`✓ Fallback: Successfully extracted ${text.length} chars from PDF`);
-          return text;
-        } else {
-          console.warn('PDF extraction returned empty or short text');
-          return `[PDF appears empty or unreadable. Try a text-based PDF or convert to .txt]`;
-        }
-      } catch (e) {
-        console.error('PDF text extraction fallback failed:', e);
-        return `[Error extracting PDF: ${e.message}. Try converting to .txt format.]`;
-      }
-    }
-    
-    console.log('No specific handler matched, checking if it looks like PDF...');
-    
-    // Fallback: check if it might be a PDF by checking first bytes
-    if (fileName.toLowerCase().endsWith('.pdf')) {
-      console.log('File ends in .pdf but type not recognized, attempting PDF extraction anyway');
-      try {
-        const text = await sendMessageToOffscreen({
-          action: 'extractPDFText',
-          pdfDataUrl: dataUrl,
-          fileName: fileName
-        });
-        if (text && text.length > 50) {
-          console.log(`✓ Successfully extracted ${text.length} chars from PDF (via fallback)`);
-          return text;
-        }
-      } catch (e) {
-        console.error('PDF fallback extraction failed:', e);
-      }
-    }
-    
-    // For document files
-    if (fileType === 'document' || fileName.endsWith('.docx') || fileName.endsWith('.doc') || blob.type.includes('word')) {
-      console.warn('Word document detected - attempting text extraction');
-      return `[Unable to extract text from Word document: ${fileName}. Please save as .txt or PDF instead.]`;
-    }
-    
-    // Try as text for unknown types
-    try {
-      const text = await blob.text();
-      if (text && text.length > 0) {
-        console.log(`Extracted ${text.length} chars from unknown file type`);
-        return text;
-      }
-    } catch (e) {
-      console.error('Generic text extraction failed:', e);
-    }
-    
-    return null;
+    return await extractTextFromBlob(blob, fileType, fileName, dataUrl);
   } catch (error) {
     console.error('Error extracting from data URL:', error);
     return null;
   }
+}
+
+async function extractTextFromBlob(blob, fileType, fileName, dataUrl = null) {
+  console.log(`File: ${fileName}, MIME: ${blob.type}, Size: ${blob.size} bytes`);
+
+  const lowerName = fileName.toLowerCase();
+  const mimeType = blob.type || '';
+
+  if (fileType === 'text' || lowerName.endsWith('.txt') || mimeType.includes('text/plain')) {
+    console.log('Detected as text file');
+    const text = await blob.text();
+    console.log(`Extracted ${text.length} chars from text file`);
+    return text;
+  }
+
+  if (fileType === 'pdf' || lowerName.endsWith('.pdf') || mimeType.includes('pdf')) {
+    console.log('✓ PDF detected - extracting text');
+    try {
+      if (dataUrl) {
+        const text = await sendMessageToOffscreen({
+          action: 'extractPDFText',
+          pdfDataUrl: dataUrl,
+          fileName: fileName
+        });
+        if (text && text.length > 50) {
+          console.log(`✓ Successfully extracted ${text.length} chars from PDF`);
+          return text;
+        }
+      }
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      const arrayData = Array.from(bytes);
+      const text = await sendMessageToOffscreen({
+        action: 'extractPDFText',
+        arrayBuffer: arrayData,
+        fileName: fileName
+      });
+      if (text && text.length > 50) {
+        console.log(`✓ Successfully extracted ${text.length} chars from PDF`);
+        return text;
+      }
+
+      console.warn('PDF extraction returned empty or short text');
+      return '[PDF appears empty or unreadable. Try a text-based PDF or convert to .txt]';
+    } catch (e) {
+      console.error('PDF text extraction failed:', e);
+      return `[Error extracting PDF: ${e.message}. Try converting to .txt format.]`;
+    }
+  }
+
+  if (fileType === 'document' || lowerName.endsWith('.docx') || lowerName.endsWith('.doc') || mimeType.includes('word')) {
+    console.warn('Word document detected - attempting text extraction');
+    return `[Unable to extract text from Word document: ${fileName}. Please save as .txt or PDF instead.]`;
+  }
+
+  try {
+    const text = await blob.text();
+    if (text && text.length > 0) {
+      console.log(`Extracted ${text.length} chars from unknown file type`);
+      return text;
+    }
+  } catch (e) {
+    console.error('Generic text extraction failed:', e);
+  }
+
+  return null;
+}
+
+async function downloadDriveFileBlob(fileId, token) {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Drive download failed (${response.status}): ${errorText || response.statusText}`);
+  }
+
+  return await response.blob();
 }
 
 async function extractPDFText(arrayBuffer) {
@@ -840,9 +845,10 @@ async function fetchFileContent(url) {
     return await response.text();
   } else if (contentType && contentType.includes('pdf')) {
     const arrayBuffer = await response.arrayBuffer();
+    const arrayData = Array.from(new Uint8Array(arrayBuffer));
     const text = await sendMessageToOffscreen({
       action: 'extractPDFText',
-      arrayBuffer
+      arrayBuffer: arrayData
     });
     return text;
   } else if (contentType && contentType.includes('word')) {
@@ -883,7 +889,6 @@ function trimContextToTokenLimit(context, maxTokens = 12000) {
          context.substring(context.length - half);
 }
 
-const VECTOR_STORE_KEY = 'vectorStore';
 const VECTOR_STORE_VERSION = 3;
 const EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-8B';
 const RAG_TOP_K = 8;
@@ -891,8 +896,10 @@ const RAG_CHUNK_SIZE = 1200;
 const RAG_CHUNK_OVERLAP = 150;
 const RAG_MAX_CHUNKS_PER_DOC = 80;
 
-async function buildRagContext(question, documents, apiKey) {
-  const store = await loadVectorStore();
+async function buildRagContext(question, documents, apiKey, driveAccessToken) {
+  console.log('Loading vector store from Drive...');
+  const store = await loadVectorStore(driveAccessToken);
+  console.log('Vector store loaded. Files:', Object.keys(store.files || {}).length);
   const fileIdMap = new Map();
   const updatedStore = { ...store, files: { ...(store.files || {}) } };
 
@@ -905,8 +912,10 @@ async function buildRagContext(question, documents, apiKey) {
       continue;
     }
 
+    console.log('Chunking document:', doc.fileName);
     const chunks = chunkTextForEmbeddings(doc.text || '');
     const limitedChunks = chunks.slice(0, RAG_MAX_CHUNKS_PER_DOC);
+    console.log('Embedding chunks:', limitedChunks.length);
     const embeddings = await embedTexts(limitedChunks, apiKey);
     const chunkEntries = limitedChunks.map((text, index) => ({
       id: `${fileId}::${index}`,
@@ -923,11 +932,15 @@ async function buildRagContext(question, documents, apiKey) {
     };
   }
 
-  await saveVectorStore(updatedStore);
+  console.log('Saving vector store to Drive...');
+  await saveVectorStore(updatedStore, driveAccessToken);
+  console.log('Vector store saved.');
 
+  console.log('Embedding query...');
   const queryEmbedding = normalizeEmbedding(
     (await embedTexts([question], apiKey))[0] || []
   );
+  console.log('Query embedding ready.');
   const scored = [];
 
   for (const [fileId, doc] of fileIdMap.entries()) {
@@ -953,6 +966,90 @@ async function buildRagContext(question, documents, apiKey) {
   }).join('\n\n');
 }
 
+async function buildRagContextWithServer(question, documents, apiKey, vectorApiUrl, vectorApiKey) {
+  const fileIdMap = new Map();
+  const upsertPayload = [];
+
+  for (const doc of documents) {
+    const fileId = buildFileId(doc);
+    fileIdMap.set(fileId, doc);
+    const chunks = chunkTextForEmbeddings(doc.text || '');
+    const limitedChunks = chunks.slice(0, RAG_MAX_CHUNKS_PER_DOC);
+    console.log('Embedding chunks for server:', limitedChunks.length);
+    const embeddings = await embedTexts(limitedChunks, apiKey);
+    limitedChunks.forEach((text, index) => {
+      upsertPayload.push({
+        fileId,
+        fileName: doc.fileName,
+        chunkId: `${fileId}::${index}`,
+        text,
+        embedding: normalizeEmbedding(embeddings[index] || [])
+      });
+    });
+  }
+
+  if (upsertPayload.length > 0) {
+    console.log('Upserting vectors to server:', upsertPayload.length);
+    await upsertVectorsToServer(vectorApiUrl, vectorApiKey, upsertPayload);
+  }
+
+  console.log('Embedding query for server...');
+  const queryEmbedding = normalizeEmbedding(
+    (await embedTexts([question], apiKey))[0] || []
+  );
+
+  const topChunks = await queryVectorsFromServer(vectorApiUrl, vectorApiKey, queryEmbedding, RAG_TOP_K);
+  if (!topChunks || topChunks.length === 0) {
+    return documents.map(doc => `[Document: ${doc.fileName}]\n${doc.text}`).join('\n\n---\n\n');
+  }
+
+  return topChunks.map((chunk, index) => {
+    return `[Excerpt ${index + 1}] (Source: ${chunk.fileName})\n${chunk.text}`;
+  }).join('\n\n');
+}
+
+function buildVectorApiUrl(baseUrl, path) {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  return `${trimmed}${path}`;
+}
+
+async function upsertVectorsToServer(baseUrl, apiKey, documents) {
+  const url = buildVectorApiUrl(baseUrl, '/vectors/upsert');
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'x-api-key': apiKey } : {})
+    },
+    body: JSON.stringify({ documents })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Vector upsert failed (${response.status}): ${errorText || response.statusText}`);
+  }
+}
+
+async function queryVectorsFromServer(baseUrl, apiKey, embedding, topK) {
+  const url = buildVectorApiUrl(baseUrl, '/vectors/query');
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(apiKey ? { 'x-api-key': apiKey } : {})
+    },
+    body: JSON.stringify({ embedding, topK })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Vector query failed (${response.status}): ${errorText || response.statusText}`);
+  }
+
+  const data = await response.json();
+  return data?.results || [];
+}
+
 function chunkTextForEmbeddings(text) {
   const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
   if (!cleaned) return [];
@@ -972,7 +1069,8 @@ async function embedTexts(texts, apiKey) {
 }
 
 async function callHuggingFaceEmbeddings(texts, apiKey) {
-  const endpoint = `https://router.huggingface.co/hf-inference/models/${EMBEDDING_MODEL}/pipeline/feature-extraction`;
+  const endpoint = 'https://router.huggingface.co/nebius/v1/embeddings';
+  console.log('Embedding request to', endpoint, 'count:', texts.length);
   const response = await fetch(endpoint, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -980,8 +1078,8 @@ async function callHuggingFaceEmbeddings(texts, apiKey) {
     },
     method: 'POST',
     body: JSON.stringify({
-      inputs: texts,
-      options: { wait_for_model: true }
+      model: EMBEDDING_MODEL,
+      input: texts
     })
   });
 
@@ -991,7 +1089,20 @@ async function callHuggingFaceEmbeddings(texts, apiKey) {
   }
 
   const data = await response.json();
-  return parseEmbeddingResponse(data, texts.length);
+  console.log('Embedding response received.');
+  return parseNebiusEmbeddingResponse(data, texts.length);
+}
+
+function parseNebiusEmbeddingResponse(data, expectedCount) {
+  if (!data || !Array.isArray(data.data)) {
+    return Array.from({ length: expectedCount }, () => []);
+  }
+
+  const embeddings = data.data.map(item => item.embedding || []);
+  if (expectedCount === 1 && embeddings.length > 0) {
+    return [embeddings[0]];
+  }
+  return embeddings;
 }
 
 function parseEmbeddingResponse(data, expectedCount) {
@@ -1061,26 +1172,298 @@ function hashText(text) {
   return `${hash}`;
 }
 
-async function loadVectorStore() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([VECTOR_STORE_KEY], (result) => {
-      const stored = result[VECTOR_STORE_KEY];
-      if (!stored || stored.version !== VECTOR_STORE_VERSION) {
-        resolve({ version: VECTOR_STORE_VERSION, files: {} });
-        return;
-      }
-      resolve(stored);
+async function loadVectorStore(driveAccessToken) {
+  if (!driveAccessToken) {
+    return { version: VECTOR_STORE_VERSION, files: {} };
+  }
+
+  try {
+    const fileId = await ensureVectorStoreFileId(driveAccessToken);
+    if (!fileId) {
+      return { version: VECTOR_STORE_VERSION, files: {} };
+    }
+    const content = await downloadDriveFileText(fileId, driveAccessToken);
+    if (!content) {
+      return { version: VECTOR_STORE_VERSION, files: {} };
+    }
+    const parsed = JSON.parse(content);
+    const store = await unwrapVectorStore(parsed);
+    if (!store || store.version !== VECTOR_STORE_VERSION) {
+      return { version: VECTOR_STORE_VERSION, files: {} };
+    }
+    return expandVectorStore(store);
+  } catch (error) {
+    console.warn('Failed to load vector store from Drive:', error);
+    return { version: VECTOR_STORE_VERSION, files: {} };
+  }
+}
+
+async function saveVectorStore(store, driveAccessToken) {
+  if (!driveAccessToken) {
+    return;
+  }
+
+  const fileId = await ensureVectorStoreFileId(driveAccessToken);
+  if (!fileId) return;
+
+  const payload = await wrapVectorStore(compactVectorStore(store));
+  await uploadDriveJsonFile(fileId, payload, driveAccessToken);
+}
+
+async function wrapVectorStore(store) {
+  const json = JSON.stringify(store);
+  if (typeof CompressionStream === 'undefined') {
+    return { version: store.version, compressed: false, data: store };
+  }
+
+  const compressed = await gzipString(json);
+  return {
+    version: store.version,
+    compressed: true,
+    data: bytesToBase64(compressed),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function unwrapVectorStore(payload) {
+  if (!payload) return null;
+  if (payload.files && payload.version) {
+    return payload;
+  }
+  if (payload.compressed && payload.data) {
+    const bytes = base64ToBytes(payload.data);
+    if (typeof DecompressionStream === 'undefined') {
+      return null;
+    }
+    const json = await gunzipString(bytes);
+    return JSON.parse(json);
+  }
+  if (payload.data && payload.data.files) {
+    return payload.data;
+  }
+  return null;
+}
+
+function compactVectorStore(store) {
+  if (!store || !store.files) return store;
+  const files = {};
+  for (const [fileId, file] of Object.entries(store.files)) {
+    const chunks = (file.chunks || []).map(chunk => {
+      const embedding = Array.isArray(chunk.embedding) || ArrayBuffer.isView(chunk.embedding)
+        ? compactEmbedding(chunk.embedding)
+        : chunk.embedding;
+      return {
+        ...chunk,
+        embedding
+      };
     });
-  });
+    files[fileId] = { ...file, chunks };
+  }
+  return { ...store, files };
 }
 
-async function saveVectorStore(store) {
-  return new Promise((resolve) => {
-    chrome.storage.local.set({ [VECTOR_STORE_KEY]: store }, () => resolve());
-  });
+function expandVectorStore(store) {
+  if (!store || !store.files) return store;
+  const files = {};
+  for (const [fileId, file] of Object.entries(store.files)) {
+    const chunks = (file.chunks || []).map(chunk => {
+      const embedding = expandEmbedding(chunk.embedding);
+      return {
+        ...chunk,
+        embedding
+      };
+    });
+    files[fileId] = { ...file, chunks };
+  }
+  return { ...store, files };
 }
 
-async function callLlamaLLMWithRetry(question, ragContext, apiKey, maxRetries = 3, proxyUrl = null, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'meta-llama/Llama-3.2-3B-Instruct') {
+function compactEmbedding(embedding) {
+  if (!embedding || (Array.isArray(embedding) && embedding.length === 0)) {
+    return embedding;
+  }
+  const array = ArrayBuffer.isView(embedding)
+    ? new Float32Array(embedding)
+    : Float32Array.from(embedding);
+  const bytes = new Uint8Array(array.buffer);
+  return {
+    format: 'f32b64',
+    length: array.length,
+    data: bytesToBase64(bytes)
+  };
+}
+
+function expandEmbedding(embedding) {
+  if (!embedding) return embedding;
+  if (embedding.format === 'f32b64' && typeof embedding.data === 'string') {
+    const bytes = base64ToBytes(embedding.data);
+    if (bytes.byteLength % 4 !== 0) {
+      return [];
+    }
+    const floatArray = new Float32Array(bytes.buffer);
+    return floatArray;
+  }
+  return embedding;
+}
+
+async function gzipString(text) {
+  const encoder = new TextEncoder();
+  const stream = new CompressionStream('gzip');
+  const writer = stream.writable.getWriter();
+  await writer.write(encoder.encode(text));
+  await writer.close();
+  const buffer = await new Response(stream.readable).arrayBuffer();
+  return new Uint8Array(buffer);
+}
+
+async function gunzipString(bytes) {
+  const stream = new DecompressionStream('gzip');
+  const writer = stream.writable.getWriter();
+  await writer.write(bytes);
+  await writer.close();
+  const buffer = await new Response(stream.readable).arrayBuffer();
+  return new TextDecoder().decode(buffer);
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+const DRIVE_VECTOR_FOLDER = 'Brightspace LLM Assistant';
+const DRIVE_VECTOR_FILE = 'vector-store.json';
+
+async function ensureVectorStoreFileId(token) {
+  const folderId = await ensureDriveFolderId(token);
+  if (!folderId) return null;
+
+  const query = `name='${DRIVE_VECTOR_FILE}' and '${folderId}' in parents and trashed=false`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name)`;
+  const searchResp = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (searchResp.ok) {
+    const searchData = await searchResp.json();
+    if (searchData.files && searchData.files.length > 0) {
+      return searchData.files[0].id;
+    }
+  }
+
+  const metadata = {
+    name: DRIVE_VECTOR_FILE,
+    mimeType: 'application/json',
+    parents: [folderId]
+  };
+  const createResp = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(metadata)
+  });
+  if (!createResp.ok) {
+    return null;
+  }
+  const created = await createResp.json();
+  return created.id || null;
+}
+
+async function ensureDriveFolderId(token) {
+  const query = `name='${DRIVE_VECTOR_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&spaces=drive&fields=files(id,name)`;
+  const searchResp = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (searchResp.ok) {
+    const searchData = await searchResp.json();
+    if (searchData.files && searchData.files.length > 0) {
+      return searchData.files[0].id;
+    }
+  }
+
+  const metadata = {
+    name: DRIVE_VECTOR_FOLDER,
+    mimeType: 'application/vnd.google-apps.folder'
+  };
+  const createResp = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(metadata)
+  });
+  if (!createResp.ok) {
+    return null;
+  }
+  const created = await createResp.json();
+  return created.id || null;
+}
+
+async function uploadDriveJsonFile(fileId, payload, token) {
+  const boundary = '===============7330845974216740156==';
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+  const content = JSON.stringify(payload);
+
+  const metadata = {
+    name: DRIVE_VECTOR_FILE,
+    mimeType: 'application/json'
+  };
+
+  const multipartBody =
+    delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) +
+    delimiter +
+    'Content-Type: application/json\r\n\r\n' +
+    content +
+    closeDelimiter;
+
+  const url = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`;
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/related; boundary="${boundary}"`
+    },
+    body: multipartBody
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Vector store upload failed (${response.status}): ${errorText || response.statusText}`);
+  }
+}
+
+async function downloadDriveFileText(fileId, token) {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`Vector store download failed (${response.status}): ${errorText || response.statusText}`);
+  }
+  return await response.text();
+}
+
+async function callLlamaLLMWithRetry(question, ragContext, apiKey, maxRetries = 3, proxyUrl = null, useLocalLLM = false, localModelName = 'llama3.2:3b-instruct', hfModel = 'google/gemma-2-2b-it') {
   let lastError;
   
   console.log(`\n=== BUILDING PROMPT ===`);
@@ -1123,7 +1506,7 @@ async function callLlamaLLMWithRetry(question, ragContext, apiKey, maxRetries = 
     }
   }
   
-  // Fall back to Hugging Face Router with vision support
+  // Fall back to Hugging Face Router for text-only models
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`Attempt ${attempt} to call Hugging Face Router with model: ${hfModel}...`);

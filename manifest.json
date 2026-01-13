@@ -17,23 +17,13 @@
     "*://*.brightspace.nyu.edu/*",
     "*://brightspace.nyu.edu/*",
     "*://localhost/*",
+    "https://www.googleapis.com/*",
     "https://router.huggingface.co/*",
     "https://api-inference.huggingface.co/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "*://*.brightspace.com/*",
-        "*://*.d2l.com/*",
-        "*://*.nyu.edu/*"
-      ],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -49,12 +39,12 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["content.js", "pdf.min.js", "pdf.worker.min.js", "offscreen.html", "offscreen.js", "renderer.html", "renderer.js", "page-pdf-renderer.js"],
+      "resources": ["pdf.min.js", "pdf.worker.min.js", "offscreen.html", "offscreen.js", "renderer.html", "renderer.js", "page-pdf-renderer.js"],
       "matches": ["<all_urls>"]
     }
   ],
   "oauth2": {
-    "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+    "client_id": "899017621392-e4plvimjp83231ttqq5j0iq5eatjltjc.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/drive.file"]
   }
 }
